@@ -1,0 +1,8 @@
+# HTTP/HTTPS Relay Proxy — Python dependencies
+# Install: pip install -r requirements.txt
+
+# YAML config parsing
+pyyaml>=6.0
+
+# HTTP requests (for connectivity checks)
+requests>=2.31.0

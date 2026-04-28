@@ -1,0 +1,12 @@
+mode: vercel
+relay_url: ""
+apps_script_url: ""
+bind_host: "127.0.0.1"
+bind_port: 8085
+mitm_enabled: false
+ca_dir: "./ca"
+cache_enabled: false
+log_full_urls: false
+log_cookies: false
+log_authorization: false
+log_request_bodies: false
