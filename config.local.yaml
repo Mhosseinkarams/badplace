@@ -1,6 +1,6 @@
 mode: vercel
 relay_url: ""
-apps_script_url: ""
+apps_script_url: "https://script.google.com/macros/s/AKfycbxnsc272M4hguTU3KJaglU1-zsPjRFPVtuIQIS_VX0hAr1pP-B_A0xX9wQK_kYOeLs/exec"
 bind_host: "127.0.0.1"
 bind_port: 8085
 mitm_enabled: false

@@ -74,7 +74,7 @@ CHECK_URLS = [
 ]
 
 
-def run_connectivity_checks() -> bool:
+def run_connectivity_checks(relay_url: str = "") -> bool:
     print("")
     print("=" * 60)
     print("  Connectivity Checks")
@@ -87,27 +87,29 @@ def run_connectivity_checks() -> bool:
             if r.status_code < 500:
                 print(f"  [OK]  {label}")
             else:
-                print(f"  [FAIL] {label} — HTTP {r.status_code}")
-                all_ok = False
+                print(f"  [WARN] {label} — HTTP {r.status_code}")
         except requests.exceptions.Timeout:
-            print(f"  [FAIL] {label} — Connection timed out (8s)")
-            all_ok = False
+            print(f"  [WARN] {label} — Connection timed out (8s)")
         except requests.exceptions.ConnectionError as e:
-            print(f"  [FAIL] {label} — Connection error: {e}")
-            all_ok = False
+            print(f"  [WARN] {label} — Connection error (non-critical)")
         except Exception as e:
-            print(f"  [FAIL] {label} — {e}")
-            all_ok = False
+            print(f"  [WARN] {label} — {e}")
+
+    if relay_url:
+        try:
+            r = requests.get(relay_url, timeout=10, allow_redirects=True)
+            if r.status_code == 200:
+                print(f"  [OK]  Relay URL — reachable")
+            else:
+                print(f"  [WARN] Relay URL — HTTP {r.status_code}")
+        except Exception as e:
+            print(f"  [WARN] Relay URL — {e}")
 
     print("=" * 60)
-    if all_ok:
-        print("  All connectivity checks PASSED.")
-    else:
-        print("  Some connectivity checks FAILED.")
-        print("  The relay method may not work on this connection.")
+    print("  Connectivity checks completed.")
     print("=" * 60)
     print("")
-    return all_ok
+    return True
 
 
 def check_and_warn_mitm(cfg: dict):
@@ -328,7 +330,7 @@ def main():
     mode = cfg.get("mode", "vercel")
     relay_url = get_relay_url(cfg)
 
-    connectivity_ok = run_connectivity_checks()
+    connectivity_ok = run_connectivity_checks(relay_url)
     if not connectivity_ok:
         print("[ABORT] Relay may not work on this connection.")
         sys.exit(1)

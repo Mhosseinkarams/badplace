@@ -20,3 +20,4 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+.mitmproxy_relay_addon.py
