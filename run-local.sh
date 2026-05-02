@@ -10,6 +10,19 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
+PID_FILE="$SCRIPT_DIR/.proxy.pid"
+RUNTIME_FILE="$SCRIPT_DIR/.proxy.runtime.json"
+
+project_proxy_pids() {
+    local pid cwd
+    for pid in $(pgrep -f "[p]roxy.py --config config.local.yaml" 2>/dev/null || true); do
+        cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+        if [ "$cwd" = "$SCRIPT_DIR" ]; then
+            echo "$pid"
+        fi
+    done
+}
+
 cat .banner
 echo ""
 
@@ -18,9 +31,18 @@ if [ ! -f "config.local.yaml" ]; then
     exit 1
 fi
 
-# Read ports from config
-BIND_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('bind_port', 8085))")
-SOCKS_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('socks_port', 1082))")
+EXISTING_PIDS="$(project_proxy_pids | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+if [ -n "$EXISTING_PIDS" ]; then
+    if [ "${STOP_EXISTING:-0}" = "1" ]; then
+        echo -e "${YELLOW}[WARN]${NC} Existing project proxy process(es) found: $EXISTING_PIDS"
+        ./stop-local.sh
+    else
+        echo -e "${RED}[ERROR]${NC} Project proxy is already running: $EXISTING_PIDS"
+        echo "  Stop it first with: ./stop-local.sh"
+        echo "  Or restart in one command: STOP_EXISTING=1 ./run-local.sh"
+        exit 1
+    fi
+fi
 
 if grep -q 'relay_url: ""' config.local.yaml && grep -q 'apps_script_url: ""' config.local.yaml && [ -z "${RELAY_URL:-}" ] && [ -z "${APPS_SCRIPT_URL:-}" ]; then
     echo -e "${RED}[ERROR]${NC} relay_url or apps_script_url not configured."
@@ -43,11 +65,23 @@ if [ ! -d ".venv" ]; then
     python3 -m venv .venv
 fi
 source .venv/bin/activate
+PYTHON="$SCRIPT_DIR/.venv/bin/python"
+PIP="$SCRIPT_DIR/.venv/bin/pip"
 echo -e "${GREEN}[OK]${NC} Virtual environment ready."
 
 echo -e "${YELLOW}[2/4]${NC} Installing dependencies..."
-pip install -q -r requirements.txt
-echo -e "${GREEN}[OK]${NC} Dependencies installed."
+REQ_HASH="$("$PYTHON" -c "import hashlib; print(hashlib.sha256(open('requirements.txt','rb').read()).hexdigest())")"
+REQ_STAMP=".venv/.requirements.sha256"
+if [ ! -f "$REQ_STAMP" ] || [ "$(cat "$REQ_STAMP")" != "$REQ_HASH" ]; then
+    "$PIP" install -q -r requirements.txt
+    echo "$REQ_HASH" > "$REQ_STAMP"
+    echo -e "${GREEN}[OK]${NC} Dependencies installed."
+else
+    echo -e "${GREEN}[OK]${NC} Dependencies already current."
+fi
+
+BIND_PORT=$("$PYTHON" -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('bind_port', 8085))")
+SOCKS_PORT=$("$PYTHON" -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('socks_port', 1082))")
 
 echo -e "${YELLOW}[3/4]${NC} Running connectivity checks..."
 CONNECTIVITY_OK=true
@@ -75,15 +109,19 @@ if [ "$CONNECTIVITY_OK" = false ]; then
 fi
 
 echo -e "${YELLOW}[4/4]${NC} Starting local proxy..."
-PID_FILE="$SCRIPT_DIR/.proxy.pid"
-python3 proxy.py --config config.local.yaml &
+rm -f "$RUNTIME_FILE"
+PROXY_RUNTIME_FILE="$RUNTIME_FILE" "$PYTHON" proxy.py --config config.local.yaml &
 PROXY_PID=$!
 echo "$PROXY_PID" > "$PID_FILE"
 sleep 2
 
-# Re-read ports after proxy startup (in case they were updated)
-BIND_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('bind_port', 8085))")
-SOCKS_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('socks_port', 1082))")
+if [ -f "$RUNTIME_FILE" ]; then
+    BIND_PORT=$("$PYTHON" -c "import json; print(json.load(open('$RUNTIME_FILE'))['bind_port'])")
+    SOCKS_PORT=$("$PYTHON" -c "import json; data=json.load(open('$RUNTIME_FILE')); print(data.get('socks_port') or '')")
+else
+    BIND_PORT=$("$PYTHON" -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('bind_port', 8085))")
+    SOCKS_PORT=$("$PYTHON" -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('socks_port', 1082))")
+fi
 
 if kill -0 "$PROXY_PID" 2>/dev/null; then
     echo ""
@@ -115,4 +153,9 @@ else
     exit 1
 fi
 
+set +e
 wait "$PROXY_PID"
+EXIT_CODE=$?
+set -e
+rm -f "$PID_FILE" "$RUNTIME_FILE"
+exit "$EXIT_CODE"

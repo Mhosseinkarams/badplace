@@ -17,11 +17,13 @@ Usage:
 import argparse
 import base64
 import errno
+import http.client
 import json
 import os
 import select
 import signal
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -229,6 +231,10 @@ class DoHResolver:
         "https://cloudflare-dns.com/dns-query",
         "https://dns.google/resolve",
     ]
+    BOOTSTRAP_IPS = {
+        "cloudflare-dns.com": ("1.1.1.1", "1.0.0.1"),
+        "dns.google": ("8.8.8.8", "8.8.4.4"),
+    }
 
     def __init__(self, providers=None, ttl=300):
         self.providers = providers or self.DEFAULT_PROVIDERS
@@ -239,11 +245,8 @@ class DoHResolver:
     def resolve(self, host: str) -> str:
         if not host:
             return host
-        try:
-            socket.inet_aton(host)
+        if self._is_ip_literal(host):
             return host
-        except OSError:
-            pass
         now = time.time()
         with self._lock:
             entry = self._cache.get(host)
@@ -251,15 +254,9 @@ class DoHResolver:
                 return entry[0]
         for provider in self.providers:
             try:
-                r = requests.get(
-                    provider,
-                    params={"name": host, "type": "A"},
-                    headers={"Accept": "application/dns-json"},
-                    timeout=5,
-                )
-                if r.status_code != 200:
+                data = self._query_provider(provider, host)
+                if not data:
                     continue
-                data = r.json()
                 for ans in data.get("Answer", []):
                     if ans.get("type") == 1:
                         ip = ans["data"]
@@ -269,6 +266,74 @@ class DoHResolver:
             except Exception:
                 continue
         return host
+
+    @staticmethod
+    def _is_ip_literal(host: str) -> bool:
+        for family in (socket.AF_INET, socket.AF_INET6):
+            try:
+                socket.inet_pton(family, host)
+                return True
+            except OSError:
+                continue
+        return False
+
+    def _query_provider(self, provider: str, host: str) -> Optional[dict]:
+        parsed = urllib.parse.urlparse(provider)
+        provider_host = parsed.hostname
+        if not provider_host:
+            return None
+
+        bootstrap_ips = self.BOOTSTRAP_IPS.get(provider_host, ())
+        if parsed.scheme == "https" and bootstrap_ips:
+            for ip in bootstrap_ips:
+                try:
+                    data = self._https_json_query(parsed, provider_host, ip, host)
+                    if data:
+                        return data
+                except Exception:
+                    continue
+
+        r = requests.get(
+            provider,
+            params={"name": host, "type": "A"},
+            headers={"Accept": "application/dns-json"},
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return None
+        return r.json()
+
+    def _https_json_query(
+        self,
+        parsed: urllib.parse.ParseResult,
+        provider_host: str,
+        connect_host: str,
+        host: str,
+    ) -> Optional[dict]:
+        port = parsed.port or 443
+        path = parsed.path or "/dns-query"
+        query = urllib.parse.urlencode({"name": host, "type": "A"})
+        if parsed.query:
+            query = f"{parsed.query}&{query}"
+        target = f"{path}?{query}"
+
+        context = ssl.create_default_context()
+        raw_sock = socket.create_connection((connect_host, port), timeout=5)
+        with context.wrap_socket(raw_sock, server_hostname=provider_host) as tls_sock:
+            request = (
+                f"GET {target} HTTP/1.1\r\n"
+                f"Host: {provider_host}\r\n"
+                "Accept: application/dns-json\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            )
+            tls_sock.sendall(request.encode("ascii"))
+            response = http.client.HTTPResponse(tls_sock)
+            response.begin()
+            body = response.read()
+            if response.status != 200:
+                return None
+            return json.loads(body.decode("utf-8"))
 
 
 # ----------------------------------------------------------------------
@@ -509,6 +574,8 @@ class Socks5Server(threading.Thread):
         self.tunnel_timeout = tunnel_timeout
         self._sock = None
         self._stop = threading.Event()
+        self.ready = threading.Event()
+        self.error = None
 
     def stop(self):
         self._stop.set()
@@ -521,6 +588,7 @@ class Socks5Server(threading.Thread):
     def run(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        requested_port = self.port
         attempt_port = self.port
         for attempt in range(20):
             try:
@@ -532,15 +600,20 @@ class Socks5Server(threading.Thread):
                 if e.errno == errno.EADDRINUSE:
                     attempt_port += 1
                     continue
-                print(f"[SOCKS5] bind failed {self.host}:{attempt_port} — {e}")
+                self.error = f"bind failed {self.host}:{attempt_port} — {e}"
+                print(f"[SOCKS5] {self.error}")
+                self.ready.set()
                 return
         else:
-            print(f"[SOCKS5] could not bind to any port starting at {self.port}")
+            self.error = f"could not bind to any port starting at {self.port}"
+            print(f"[SOCKS5] {self.error}")
+            self.ready.set()
             return
 
-        if attempt_port != self.port:
-            print(f"[WARN] SOCKS5 port {self.port} was changed because the original port was in use.")
+        if self.port != requested_port:
+            print(f"[WARN] SOCKS5 port {requested_port} was changed because the original port was in use.")
         print(f"[SOCKS5] listening on {self.host}:{self.port}")
+        self.ready.set()
         while not self._stop.is_set():
             try:
                 client, addr = self._sock.accept()
@@ -680,6 +753,7 @@ def main():
     RelayProxyHandler.log_request_bodies = cfg.get("log_request_bodies", False)
     RelayProxyHandler.resolver = resolver
 
+    requested_socks_port = socks_port
     if socks_enabled:
         allocated_socks_port = find_free_port(bind_host, socks_port)
         if allocated_socks_port is None:
@@ -689,21 +763,65 @@ def main():
             print(f"[WARN] SOCKS5 port {socks_port} is in use, using {allocated_socks_port} instead.")
             socks_port = allocated_socks_port
 
+    requested_bind_port = bind_port
     allocated_bind_port = find_free_port(bind_host, bind_port)
     if allocated_bind_port is None:
         print(f"[ERROR] Unable to find an available HTTP proxy port starting at {bind_port}")
         sys.exit(1)
-    if allocated_bind_port != cfg.get("bind_port", 8085):
-        cfg["bind_port"] = allocated_bind_port
-        with open(config_path, "w") as f:
-            yaml.dump(cfg, f)
-        print(f"[INFO] Updated config.local.yaml with new bind_port: {allocated_bind_port}")
+    bind_port = allocated_bind_port
+    if bind_port != requested_bind_port:
+        print(f"[WARN] HTTP proxy port {requested_bind_port} is in use, using {bind_port} instead.")
 
-    if socks_enabled and allocated_socks_port != cfg.get("socks_port", 1080):
-        cfg["socks_port"] = allocated_socks_port
-        with open(config_path, "w") as f:
-            yaml.dump(cfg, f)
-        print(f"[INFO] Updated config.local.yaml with new socks_port: {allocated_socks_port}")
+    socks_server = None
+    server = None
+    attempt_bind_port = bind_port
+    for attempt in range(20):
+        try:
+            server = ThreadingHTTPServer((bind_host, attempt_bind_port), RelayProxyHandler)
+            bind_port = attempt_bind_port
+            break
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                attempt_bind_port += 1
+                continue
+            raise
+    else:
+        print(f"[ERROR] Could not bind HTTP server to any port starting at {bind_port}")
+        if socks_server:
+            socks_server.stop()
+        sys.exit(1)
+
+    if bind_port != requested_bind_port and bind_port != allocated_bind_port:
+        print(f"[WARN] HTTP proxy port changed again during bind; using {bind_port}.")
+
+    if socks_enabled:
+        socks_server = Socks5Server(bind_host, socks_port, resolver)
+        socks_server.start()
+        if not socks_server.ready.wait(timeout=5):
+            print("[ERROR] SOCKS5 server did not finish startup.")
+            server.server_close()
+            sys.exit(1)
+        if socks_server.error:
+            print(f"[ERROR] SOCKS5 server failed: {socks_server.error}")
+            server.server_close()
+            sys.exit(1)
+        socks_port = socks_server.port
+
+    runtime_file = Path(os.environ.get("PROXY_RUNTIME_FILE", str(config_path.parent / ".proxy.runtime.json")))
+    runtime_info = {
+        "pid": os.getpid(),
+        "bind_host": bind_host,
+        "bind_port": bind_port,
+        "socks_enabled": socks_enabled,
+        "socks_port": socks_port if socks_enabled else None,
+        "requested_bind_port": requested_bind_port,
+        "requested_socks_port": requested_socks_port if socks_enabled else None,
+    }
+    try:
+        with open(runtime_file, "w") as f:
+            json.dump(runtime_info, f, indent=2)
+    except OSError as e:
+        print(f"[WARN] Unable to write runtime info file {runtime_file}: {e}")
 
     print("Starting v7lthronyx proxy...")
     print("")
@@ -735,35 +853,6 @@ def main():
     print("=" * 60)
     print("")
 
-    socks_server = None
-    if socks_enabled:
-        socks_server = Socks5Server(bind_host, socks_port, resolver)
-        socks_server.start()
-
-    server = None
-    attempt_bind_port = bind_port
-    for attempt in range(20):
-        try:
-            server = ThreadingHTTPServer((bind_host, attempt_bind_port), RelayProxyHandler)
-            bind_port = attempt_bind_port
-            break
-        except OSError as e:
-            if e.errno == errno.EADDRINUSE:
-                attempt_bind_port += 1
-                continue
-            raise
-    else:
-        print(f"[ERROR] Could not bind HTTP server to any port starting at {bind_port}")
-        if socks_server:
-            socks_server.stop()
-        sys.exit(1)
-
-    if attempt_bind_port != cfg.get("bind_port", 8085):
-        cfg["bind_port"] = attempt_bind_port
-        with open(config_path, "w") as f:
-            yaml.dump(cfg, f)
-        print(f"[INFO] Updated config.local.yaml with final bind_port: {attempt_bind_port}")
-
     print(f"[INFO] Proxy is running on {bind_host}:{bind_port}. Press Ctrl+C to stop.")
     print("")
 
@@ -771,8 +860,7 @@ def main():
         print("\n[INFO] Stopping proxy...")
         if socks_server:
             socks_server.stop()
-        server.shutdown()
-        sys.exit(0)
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -781,9 +869,14 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[INFO] Proxy stopped by user.")
+    finally:
         if socks_server:
             socks_server.stop()
         server.server_close()
+        try:
+            runtime_file.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

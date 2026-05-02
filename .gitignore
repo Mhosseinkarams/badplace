@@ -8,6 +8,7 @@ build/
 
 # Proxy
 .proxy.pid
+.proxy.runtime.json
 .mitmproxy_relay_addon.py
 ca/
 

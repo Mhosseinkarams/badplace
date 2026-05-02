@@ -6,44 +6,73 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$SCRIPT_DIR/.proxy.pid"
+RUNTIME_FILE="$SCRIPT_DIR/.proxy.runtime.json"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
-if [ ! -f "$PID_FILE" ]; then
-    echo -e "${RED}[ERROR]${NC} No proxy PID file found at $PID_FILE"
-    echo "  The proxy may not be running, or was started manually."
-    echo ""
-    echo "  To find and kill it manually:"
-    echo "    ps aux | grep proxy.py"
-    echo "    kill <PID>"
-    exit 1
-fi
+stop_pid() {
+    local pid="$1"
+    local label="${2:-proxy}"
 
-PID=$(cat "$PID_FILE")
+    if ! kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
 
-if kill -0 "$PID" 2>/dev/null; then
-    echo "Stopping proxy (PID: $PID)..."
-    kill "$PID" 2>/dev/null || true
+    echo "Stopping $label (PID: $pid)..."
+    kill "$pid" 2>/dev/null || true
 
-    # Wait for graceful shutdown
     for i in $(seq 1 5); do
-        if ! kill -0 "$PID" 2>/dev/null; then
+        if ! kill -0 "$pid" 2>/dev/null; then
             break
         fi
         sleep 1
     done
 
-    # Force kill if still running
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Force stopping $label..."
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+}
+
+project_proxy_pids() {
+    local pid cwd
+    for pid in $(pgrep -f "[p]roxy.py --config config.local.yaml" 2>/dev/null || true); do
+        cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+        if [ "$cwd" = "$SCRIPT_DIR" ]; then
+            echo "$pid"
+        fi
+    done
+}
+
+STOPPED=false
+
+if [ -f "$PID_FILE" ]; then
+    PID=$(cat "$PID_FILE")
+
     if kill -0 "$PID" 2>/dev/null; then
-        echo "Force stopping proxy..."
-        kill -9 "$PID" 2>/dev/null || true
+        stop_pid "$PID" "proxy"
+        STOPPED=true
+    else
+        echo "Proxy (PID: $PID) is not running. Cleaning up PID file."
     fi
 
-    echo -e "${GREEN}[OK]${NC} Proxy stopped."
+    rm -f "$PID_FILE"
 else
-    echo "Proxy (PID: $PID) is not running. Cleaning up PID file."
+    echo -e "${YELLOW}[WARN]${NC} No proxy PID file found at $PID_FILE"
 fi
 
-rm -f "$PID_FILE"
+for PID in $(project_proxy_pids); do
+    stop_pid "$PID" "stale project proxy"
+    STOPPED=true
+done
+
+if [ "$STOPPED" = true ]; then
+    echo -e "${GREEN}[OK]${NC} Proxy stopped."
+else
+    echo "No running project proxy processes found."
+fi
+
+rm -f "$RUNTIME_FILE"
