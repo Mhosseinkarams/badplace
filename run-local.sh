@@ -18,6 +18,10 @@ if [ ! -f "config.local.yaml" ]; then
     exit 1
 fi
 
+# Read ports from config
+BIND_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('bind_port', 8085))")
+SOCKS_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('socks_port', 1082))")
+
 if grep -q 'relay_url: ""' config.local.yaml && grep -q 'apps_script_url: ""' config.local.yaml && [ -z "${RELAY_URL:-}" ] && [ -z "${APPS_SCRIPT_URL:-}" ]; then
     echo -e "${RED}[ERROR]${NC} relay_url or apps_script_url not configured."
     echo ""
@@ -77,6 +81,10 @@ PROXY_PID=$!
 echo "$PROXY_PID" > "$PID_FILE"
 sleep 2
 
+# Re-read ports after proxy startup (in case they were updated)
+BIND_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('bind_port', 8085))")
+SOCKS_PORT=$(python3 -c "import yaml; cfg=yaml.safe_load(open('config.local.yaml')); print(cfg.get('socks_port', 1082))")
+
 if kill -0 "$PROXY_PID" 2>/dev/null; then
     echo ""
     echo -e "${GREEN}============================================${NC}"
@@ -86,19 +94,19 @@ if kill -0 "$PROXY_PID" 2>/dev/null; then
     echo -e "  PID: ${CYAN}$PROXY_PID${NC}"
     echo ""
     echo -e "  ${YELLOW}Proxy Settings:${NC}"
-    echo -e "    HTTP Proxy:   ${CYAN}127.0.0.1:8085${NC}"
-    echo -e "    HTTPS Proxy:  ${CYAN}127.0.0.1:8085${NC}"
-    echo -e "    SOCKS5 Proxy: ${CYAN}127.0.0.1:1082${NC}"
+    echo -e "    HTTP Proxy:   ${CYAN}127.0.0.1:$BIND_PORT${NC}"
+    echo -e "    HTTPS Proxy:  ${CYAN}127.0.0.1:$BIND_PORT${NC}"
+    echo -e "    SOCKS5 Proxy: ${CYAN}127.0.0.1:$SOCKS_PORT${NC}"
     echo ""
     echo -e "  ${YELLOW}Health Endpoints:${NC}"
-    echo -e "    ${CYAN}http://127.0.0.1:8085/health${NC}"
-    echo -e "    ${CYAN}http://127.0.0.1:8085/test-google${NC}"
-    echo -e "    ${CYAN}http://127.0.0.1:8085/test-relay${NC}"
+    echo -e "    ${CYAN}http://127.0.0.1:$BIND_PORT/health${NC}"
+    echo -e "    ${CYAN}http://127.0.0.1:$BIND_PORT/test-google${NC}"
+    echo -e "    ${CYAN}http://127.0.0.1:$BIND_PORT/test-relay${NC}"
     echo ""
     echo -e "  ${YELLOW}Stop:${NC}  ./stop-local.sh"
     echo ""
     echo -e "  ${YELLOW}Browser:${NC}"
-    echo -e "    chromium --proxy-server='http://127.0.0.1:8085' \\"
+    echo -e "    chromium --proxy-server='http://127.0.0.1:$BIND_PORT' \\"
     echo -e "              --user-data-dir='/tmp/proxy-browser-profile'"
     echo ""
 else

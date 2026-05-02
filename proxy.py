@@ -320,12 +320,12 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
             return
 
         target_ip = self.resolver.resolve(host) if self.resolver else host
-        print(f"[CONNECT] {host}:{port} -> {target_ip}")
+        print(f"[CONNECT] https://{host}:{port} -> {target_ip}")
 
         try:
             remote = socket.create_connection((target_ip, port), timeout=self.connect_timeout)
         except OSError as e:
-            print(f"[CONNECT] failed {host}:{port} — {e}")
+            print(f"[CONNECT] failed https://{host}:{port} — {e}")
             self._safe_text_response(502, f"CONNECT failed: {e}")
             return
 
@@ -693,9 +693,17 @@ def main():
     if allocated_bind_port is None:
         print(f"[ERROR] Unable to find an available HTTP proxy port starting at {bind_port}")
         sys.exit(1)
-    if allocated_bind_port != bind_port:
-        print(f"[WARN] HTTP proxy port {bind_port} is in use, using {allocated_bind_port} instead.")
-        bind_port = allocated_bind_port
+    if allocated_bind_port != cfg.get("bind_port", 8085):
+        cfg["bind_port"] = allocated_bind_port
+        with open(config_path, "w") as f:
+            yaml.dump(cfg, f)
+        print(f"[INFO] Updated config.local.yaml with new bind_port: {allocated_bind_port}")
+
+    if socks_enabled and allocated_socks_port != cfg.get("socks_port", 1080):
+        cfg["socks_port"] = allocated_socks_port
+        with open(config_path, "w") as f:
+            yaml.dump(cfg, f)
+        print(f"[INFO] Updated config.local.yaml with new socks_port: {allocated_socks_port}")
 
     print("Starting v7lthronyx proxy...")
     print("")
@@ -732,7 +740,30 @@ def main():
         socks_server = Socks5Server(bind_host, socks_port, resolver)
         socks_server.start()
 
-    server = ThreadingHTTPServer((bind_host, bind_port), RelayProxyHandler)
+    server = None
+    attempt_bind_port = bind_port
+    for attempt in range(20):
+        try:
+            server = ThreadingHTTPServer((bind_host, attempt_bind_port), RelayProxyHandler)
+            bind_port = attempt_bind_port
+            break
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                attempt_bind_port += 1
+                continue
+            raise
+    else:
+        print(f"[ERROR] Could not bind HTTP server to any port starting at {bind_port}")
+        if socks_server:
+            socks_server.stop()
+        sys.exit(1)
+
+    if attempt_bind_port != cfg.get("bind_port", 8085):
+        cfg["bind_port"] = attempt_bind_port
+        with open(config_path, "w") as f:
+            yaml.dump(cfg, f)
+        print(f"[INFO] Updated config.local.yaml with final bind_port: {attempt_bind_port}")
+
     print(f"[INFO] Proxy is running on {bind_host}:{bind_port}. Press Ctrl+C to stop.")
     print("")
 

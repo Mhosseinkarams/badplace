@@ -1,27 +1,18 @@
-mode: apps_script
-relay_url: ""
-apps_script_url: "https://script.google.com/macros/s/AKfycbxnsc272M4hguTU3KJaglU1-zsPjRFPVtuIQIS_VX0hAr1pP-B_A0xX9wQK_kYOeLs/exec"
-
-bind_host: "127.0.0.1"
-bind_port: 8085
-
-# SOCKS5 frontend (TCP CONNECT only)
-socks_enabled: true
-socks_port: 1082
-
-# DNS-over-HTTPS (so we don't depend on the local resolver)
-doh_enabled: false
-doh_providers:
-  - "https://cloudflare-dns.com/dns-query"
-  - "https://dns.google/resolve"
-
-# HTTPS interception (advanced — requires installing the CA cert).
-# When false, HTTPS CONNECT tunnels are passed through directly.
-mitm_enabled: false
-ca_dir: "./ca"
-
+apps_script_url: https://script.google.com/macros/s/AKfycbxnsc272M4hguTU3KJaglU1-zsPjRFPVtuIQIS_VX0hAr1pP-B_A0xX9wQK_kYOeLs/exec
+bind_host: 127.0.0.1
+bind_port: 8094
+ca_dir: ./ca
 cache_enabled: false
+doh_enabled: true
+doh_providers:
+- https://cloudflare-dns.com/dns-query
+- https://dns.google/resolve
+log_authorization: true
+log_cookies: true
 log_full_urls: true
-log_cookies: false
-log_authorization: false
-log_request_bodies: false
+log_request_bodies: true
+mitm_enabled: false
+mode: apps_script
+relay_url: ''
+socks_enabled: true
+socks_port: 1091
