@@ -21,7 +21,7 @@ mitm_enabled: false
 ca_dir: "./ca"
 
 cache_enabled: false
-log_full_urls: false
+log_full_urls: true
 log_cookies: false
 log_authorization: false
 log_request_bodies: false
