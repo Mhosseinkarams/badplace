@@ -34,9 +34,11 @@ function doPost(e) {
     const method = payload.method.toUpperCase();
     const url = payload.url;
     const headers = payload.headers || {};
-    const body = payload.body;
-
-    console.log(`[${method}] ${url}`);
+    let body = payload.body;
+    if (payload.body_b64) {
+      body = Utilities.base64Decode(payload.body_b64);
+      body = Utilities.newBlob(body).getDataAsString();
+    }
 
     const options = {
       method: method,
@@ -53,7 +55,6 @@ function doPost(e) {
     const responseCode = response.getResponseCode();
     const responseBody = response.getContentText();
 
-    console.log(`Response: ${responseCode}`);
 
     return ContentService
       .createTextOutput(JSON.stringify({status: responseCode, body: responseBody}))

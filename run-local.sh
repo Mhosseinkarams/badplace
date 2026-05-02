@@ -18,14 +18,18 @@ if [ ! -f "config.local.yaml" ]; then
     exit 1
 fi
 
-if grep -q 'relay_url: ""' config.local.yaml && [ -z "${RELAY_URL:-}" ] && [ -z "${APPS_SCRIPT_URL:-}" ]; then
-    echo -e "${RED}[ERROR]${NC} relay_url not configured."
+if grep -q 'relay_url: ""' config.local.yaml && grep -q 'apps_script_url: ""' config.local.yaml && [ -z "${RELAY_URL:-}" ] && [ -z "${APPS_SCRIPT_URL:-}" ]; then
+    echo -e "${RED}[ERROR]${NC} relay_url or apps_script_url not configured."
     echo ""
     echo "  Set it in config.local.yaml:"
     echo "    relay_url: 'https://your-relay-url.com'"
+    echo "    # or"
+    echo "    apps_script_url: 'https://script.google.com/macros/s/...'"
     echo ""
     echo "  Or via environment variable:"
     echo "    export RELAY_URL='https://your-relay-url.com'"
+    echo "    # or"
+    echo "    export APPS_SCRIPT_URL='https://script.google.com/macros/s/...'"
     echo ""
     exit 1
 fi
@@ -49,7 +53,7 @@ check_url() {
     if curl -4IsS --connect-timeout 8 "$url" > /dev/null 2>&1; then
         echo -e "  ${GREEN}[OK]${NC}  $label"
     else
-        echo -e "  ${RED}[FAIL]${NC} $label"
+        echo -e "  ${YELLOW}[WARN]${NC} $label"
         CONNECTIVITY_OK=false
     fi
 }
@@ -58,10 +62,13 @@ check_url "https://script.googleusercontent.com" "Google Scripts CDN"
 check_url "https://www.google.com/generate_204" "Google Connectivity"
 
 if [ "$CONNECTIVITY_OK" = false ]; then
-    echo -e "${RED}[ABORT]${NC} Connectivity checks failed."
-    exit 1
+    echo -e "${YELLOW}[WARN]${NC} Some connectivity checks failed. The proxy will still start, but relay requests may fail if the backend is not reachable."
+    echo -e "  If you want to abort instead, set STRICT_CHECKS=1 and rerun."
+    if [ "${STRICT_CHECKS:-0}" = "1" ]; then
+        echo -e "${RED}[ABORT]${NC} Strict connectivity checks enabled."
+        exit 1
+    fi
 fi
-echo -e "${GREEN}[OK]${NC} All connectivity checks passed."
 
 echo -e "${YELLOW}[4/4]${NC} Starting local proxy..."
 PID_FILE="$SCRIPT_DIR/.proxy.pid"
@@ -81,7 +88,7 @@ if kill -0 "$PROXY_PID" 2>/dev/null; then
     echo -e "  ${YELLOW}Proxy Settings:${NC}"
     echo -e "    HTTP Proxy:   ${CYAN}127.0.0.1:8085${NC}"
     echo -e "    HTTPS Proxy:  ${CYAN}127.0.0.1:8085${NC}"
-    echo -e "    SOCKS5 Proxy: ${CYAN}127.0.0.1:1080${NC}"
+    echo -e "    SOCKS5 Proxy: ${CYAN}127.0.0.1:1081${NC}"
     echo ""
     echo -e "  ${YELLOW}Health Endpoints:${NC}"
     echo -e "    ${CYAN}http://127.0.0.1:8085/health${NC}"

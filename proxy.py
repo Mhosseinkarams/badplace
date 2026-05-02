@@ -415,7 +415,7 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
 
         try:
             resp = requests.post(
-                self.relay_url, json=payload, timeout=60,
+                self.relay_url, json=payload, timeout=30,
                 allow_redirects=True, headers={"Content-Type": "application/json"},
             )
             if resp.status_code == 200:
@@ -632,7 +632,7 @@ def main():
 
     print(V7_BANNER)
 
-    run_connectivity_checks(relay_url)
+    # run_connectivity_checks(relay_url)
     check_and_warn_mitm(cfg)
 
     resolver = DoHResolver(providers=doh_providers) if doh_enabled else None

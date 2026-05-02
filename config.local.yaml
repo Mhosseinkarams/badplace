@@ -1,4 +1,4 @@
-mode: vercel
+mode: apps_script
 relay_url: ""
 apps_script_url: "https://script.google.com/macros/s/AKfycbxnsc272M4hguTU3KJaglU1-zsPjRFPVtuIQIS_VX0hAr1pP-B_A0xX9wQK_kYOeLs/exec"
 
@@ -7,10 +7,10 @@ bind_port: 8085
 
 # SOCKS5 frontend (TCP CONNECT only)
 socks_enabled: true
-socks_port: 1080
+socks_port: 1081
 
 # DNS-over-HTTPS (so we don't depend on the local resolver)
-doh_enabled: true
+doh_enabled: false
 doh_providers:
   - "https://cloudflare-dns.com/dns-query"
   - "https://dns.google/resolve"
