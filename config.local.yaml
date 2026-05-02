@@ -7,7 +7,7 @@ bind_port: 8085
 
 # SOCKS5 frontend (TCP CONNECT only)
 socks_enabled: true
-socks_port: 1081
+socks_port: 1082
 
 # DNS-over-HTTPS (so we don't depend on the local resolver)
 doh_enabled: false

@@ -30,6 +30,7 @@ import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn
+from typing import Optional
 
 import requests
 import yaml
@@ -195,6 +196,28 @@ def check_and_warn_mitm(cfg: dict):
         print(f"[INFO] CA certificate generated: {ca_cert}")
     else:
         print(f"[INFO] Using existing CA certificate: {ca_cert}")
+
+
+def find_free_port(host: str, start_port: int, max_tries: int = 100) -> Optional[int]:
+    if start_port == 0:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, 0))
+            return sock.getsockname()[1]
+
+    port = int(start_port)
+    for offset in range(max_tries):
+        candidate = port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((host, candidate))
+                return candidate
+        except OSError as e:
+            if e.errno in (errno.EADDRINUSE, errno.EACCES):
+                continue
+            raise
+    return None
 
 
 # ----------------------------------------------------------------------
@@ -498,12 +521,25 @@ class Socks5Server(threading.Thread):
     def run(self):
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            self._sock.bind((self.host, self.port))
-            self._sock.listen(64)
-        except OSError as e:
-            print(f"[SOCKS5] bind failed {self.host}:{self.port} — {e}")
+        attempt_port = self.port
+        for attempt in range(20):
+            try:
+                self._sock.bind((self.host, attempt_port))
+                self._sock.listen(64)
+                self.port = attempt_port
+                break
+            except OSError as e:
+                if e.errno == errno.EADDRINUSE:
+                    attempt_port += 1
+                    continue
+                print(f"[SOCKS5] bind failed {self.host}:{attempt_port} — {e}")
+                return
+        else:
+            print(f"[SOCKS5] could not bind to any port starting at {self.port}")
             return
+
+        if attempt_port != self.port:
+            print(f"[WARN] SOCKS5 port {self.port} was changed because the original port was in use.")
         print(f"[SOCKS5] listening on {self.host}:{self.port}")
         while not self._stop.is_set():
             try:
@@ -643,6 +679,23 @@ def main():
     RelayProxyHandler.log_authorization = cfg.get("log_authorization", False)
     RelayProxyHandler.log_request_bodies = cfg.get("log_request_bodies", False)
     RelayProxyHandler.resolver = resolver
+
+    if socks_enabled:
+        allocated_socks_port = find_free_port(bind_host, socks_port)
+        if allocated_socks_port is None:
+            print(f"[ERROR] Unable to find an available SOCKS5 port starting at {socks_port}")
+            sys.exit(1)
+        if allocated_socks_port != socks_port:
+            print(f"[WARN] SOCKS5 port {socks_port} is in use, using {allocated_socks_port} instead.")
+            socks_port = allocated_socks_port
+
+    allocated_bind_port = find_free_port(bind_host, bind_port)
+    if allocated_bind_port is None:
+        print(f"[ERROR] Unable to find an available HTTP proxy port starting at {bind_port}")
+        sys.exit(1)
+    if allocated_bind_port != bind_port:
+        print(f"[WARN] HTTP proxy port {bind_port} is in use, using {allocated_bind_port} instead.")
+        bind_port = allocated_bind_port
 
     print("Starting v7lthronyx proxy...")
     print("")

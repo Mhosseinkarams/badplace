@@ -88,7 +88,7 @@ if kill -0 "$PROXY_PID" 2>/dev/null; then
     echo -e "  ${YELLOW}Proxy Settings:${NC}"
     echo -e "    HTTP Proxy:   ${CYAN}127.0.0.1:8085${NC}"
     echo -e "    HTTPS Proxy:  ${CYAN}127.0.0.1:8085${NC}"
-    echo -e "    SOCKS5 Proxy: ${CYAN}127.0.0.1:1081${NC}"
+    echo -e "    SOCKS5 Proxy: ${CYAN}127.0.0.1:1082${NC}"
     echo ""
     echo -e "  ${YELLOW}Health Endpoints:${NC}"
     echo -e "    ${CYAN}http://127.0.0.1:8085/health${NC}"
