@@ -1,83 +1,131 @@
 /**
- * HTTP/HTTPS Relay Proxy — Google Apps Script v2.0
- * =================================================
- *
- * این اسکریپت به عنوان یک relay عمل می‌کند که درخواست‌های HTTP را
- * از طریق Google Apps Script به مقصد نهایی ارسال می‌کند.
- *
+ * HTTP/HTTPS Relay Proxy — Google Apps Script
+ * ============================================
+ * این اسکریپت به عنوان relay برای عبور از فیلترینگ ایران کار می‌کند.
+ * فقط script.google.com و script.googleusercontent.com نیاز است باز باشند.
+ * 
  * نحوه استفاده:
- * 1. این کد را در Google Apps Script Editor کپی کنید
- * 2. File → New → Script
- * 3. کد را paste کنید
- * 4. Deploy → New deployment
- * 5. Type: Web app
- * 6. Execute as: Me
- * 7. Who has access: Anyone
- * 8. Deploy و URL را کپی کنید
- * 9. URL را در config.local.yaml یا APPS_SCRIPT_URL قرار دهید
+ * 1. به script.google.com بروید
+ * 2. پروژه جدید بسازید
+ * 3. این کد را کپی کنید
+ * 4. Deploy → New deployment → Web app
+ * 5. Execute as: Me
+ * 6. Who has access: Anyone
+ * 7. URL را در config.local.yaml قرار دهید
  */
 
-/**
- * Handler اصلی برای درخواست‌های POST
- * Google Apps Script بعد از ریدایرکت، درخواست POST را اینجا پردازش می‌کند
- */
 function doPost(e) {
   try {
+    if (!e.postData || !e.postData.contents) {
+      return jsonOut({ error: "No POST data provided" });
+    }
+
     const payload = JSON.parse(e.postData.contents);
 
+    // --- Basic validation ---
     if (!payload.method || !payload.url) {
-      return ContentService
-        .createTextOutput(JSON.stringify({error: "Invalid payload: method and url are required"}))
-        .setMimeType(ContentService.MimeType.JSON);
+      return jsonOut({
+        error: "Invalid payload",
+        message: "Fields 'method' and 'url' are required"
+      });
     }
 
-    const method = payload.method.toUpperCase();
-    const url = payload.url;
+    const method = String(payload.method).trim().toUpperCase();
+    const url = String(payload.url).trim();
     const headers = payload.headers || {};
-    let body = payload.body;
+
+    // --- Body preparation ---
+    let body = null;
+
     if (payload.body_b64) {
-      body = Utilities.base64Decode(payload.body_b64);
-      body = Utilities.newBlob(body).getDataAsString();
+      try {
+        const decodedBytes = Utilities.base64Decode(payload.body_b64);
+        // Always treat as raw bytes – keep it as a Blob to avoid corrupting binary data
+        body = Utilities.newBlob(decodedBytes);
+      } catch (b64Error) {
+        return jsonOut({ error: "Invalid Base64 body", details: b64Error.message });
+      }
+    } else if (payload.body !== undefined && payload.body !== null) {
+      // Plain text body
+      body = String(payload.body);
     }
 
+    // --- Build fetch options ---
     const options = {
       method: method,
       headers: headers,
       muteHttpExceptions: true,
-      followRedirects: true
+      followRedirects: payload.followRedirects !== undefined ? payload.followRedirects : true,
+      validateHttpsCertificates: payload.validateSsl !== undefined ? payload.validateSsl : true
     };
 
-    if (["POST", "PUT", "PATCH", "DELETE"].includes(method) && body) {
+    // Attach body for write methods
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(method) && body !== null) {
       options.payload = body;
     }
 
+    // Explicit content type if provided
+    if (payload.contentType) {
+      options.contentType = payload.contentType;
+    }
+
+    // --- Execute fetch ---
     const response = UrlFetchApp.fetch(url, options);
     const responseCode = response.getResponseCode();
-    const responseBody = response.getContentText();
+    const responseHeaders = response.getAllHeaders();
+    const responseBytes = response.getContent();
 
+    // Decide how to return the body:
+    //   - if it's text, return as plain string
+    //   - otherwise, base64‑encode and return
+    let result;
+    try {
+      // Attempt to decode as UTF‑8 text
+      const textBody = Utilities.newBlob(responseBytes).getDataAsString();
+      result = {
+        status: responseCode,
+        headers: responseHeaders,
+        body: textBody
+      };
+    } catch (_) {
+      // Binary content → return base64
+      result = {
+        status: responseCode,
+        headers: responseHeaders,
+        body_b64: Utilities.base64Encode(responseBytes)
+      };
+    }
 
-    return ContentService
-      .createTextOutput(JSON.stringify({status: responseCode, body: responseBody}))
-      .setMimeType(ContentService.MimeType.JSON);
+    return jsonOut(result);
 
   } catch (error) {
-    console.error("Error:", error);
-    return ContentService
-      .createTextOutput(JSON.stringify({error: error.toString(), message: "Relay error occurred"}))
-      .setMimeType(ContentService.MimeType.JSON);
+    console.error("Relay Error:", error);
+    return jsonOut({
+      error: true,
+      message: error.message,
+      stack: error.stack || null
+    });
   }
 }
 
 /**
- * Handler برای درخواست‌های GET (برای تست)
+ * GET endpoint (health check)
  */
 function doGet(e) {
+  return jsonOut({
+    status: "ok",
+    service: "HTTP/HTTPS Relay Proxy",
+    version: "3.2",
+    message: "Send POST requests to relay HTTP calls.",
+    note: "Optimized for Iranian filtering conditions"
+  });
+}
+
+/**
+ * Helper: Safe JSON output
+ */
+function jsonOut(obj) {
   return ContentService
-    .createTextOutput(JSON.stringify({
-      status: "ok",
-      service: "HTTP/HTTPS Relay Proxy",
-      version: "2.0",
-      message: "Use POST to relay HTTP requests"
-    }))
+    .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }

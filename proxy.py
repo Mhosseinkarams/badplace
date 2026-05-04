@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 v7lthronyx RELAY PROXY — Local Mode
 ====================================
@@ -37,6 +36,15 @@ from typing import Optional
 import requests
 import yaml
 
+# --- Certificate Generation Imports ---
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+import datetime
+# ------------------------------------
+
+
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.local.yaml"
 
 V7_BANNER = r"""
@@ -45,7 +53,7 @@ __   __    |  ___| | | |
 \ \ / /___ | |_  | |_| |__  _ __ ___  _ __  _   ___  __
  \ V /____||  _| | __| '_ \| '__/ _ \| '_ \| | | \ \/ /
   | ||____|| |   | |_| | | | | | (_) | | | | |_| |>  <
-  \_/      |_|    \__|_| |_|_|  \___/|_| |_|\__, /_/\_\
+  \_/      |_|    \__|_| |_|_|  \___/|_| |_|\__, /_/\_/
                                             |___/
             R E L A Y   P R O X Y   v3.1
        Author : v7lthronyx (Aiden Azad)
@@ -85,6 +93,9 @@ def load_config(config_path: Path) -> dict:
     else:
         print(f"[ERROR] Unsupported mode: {mode}. Supported: 'vercel', 'apps_script'")
         sys.exit(1)
+
+    if "mitm_enabled" not in cfg:
+        cfg["mitm_enabled"] = True
 
     return cfg
 
@@ -140,40 +151,39 @@ def run_connectivity_checks(relay_url: str = "") -> bool:
     return True
 
 
-def check_and_warn_mitm(cfg: dict):
-    if not cfg.get("mitm_enabled", False):
-        return
+# ----------------------------------------------------------------------
+#  MITM CA and certificate generation
+# ----------------------------------------------------------------------
+class CertManager:
+    def __init__(self, ca_dir: Path):
+        self.ca_dir = ca_dir
+        self.ca_key_path = ca_dir / "ca.key"
+        self.ca_cert_path = ca_dir / "ca.pem"
+        self.certs = {}
+        self._lock = threading.Lock()
+        self._load_or_generate_ca()
 
-    print("")
-    print("!" * 60)
-    print("  WARNING: HTTPS MITM is ENABLED.")
-    print("  You will need to install the Root CA in your browser.")
-    print("!" * 60)
-    print("")
+    def _load_or_generate_ca(self):
+        self.ca_dir.mkdir(parents=True, exist_ok=True)
+        if not self.ca_key_path.exists() or not self.ca_cert_path.exists():
+            print("[INFO] Generating CA certificate and key...")
+            self._generate_ca()
+        else:
+            print(f"[INFO] Using existing CA certificate: {self.ca_cert_path}")
+            with open(self.ca_key_path, "rb") as f:
+                self.ca_key = serialization.load_pem_private_key(f.read(), password=None)
+            with open(self.ca_cert_path, "rb") as f:
+                self.ca_cert = x509.load_pem_x509_certificate(f.read())
 
-    ca_dir = Path(cfg.get("ca_dir", "./ca"))
-    ca_dir.mkdir(parents=True, exist_ok=True)
-
-    ca_key = ca_dir / "ca.key"
-    ca_cert = ca_dir / "ca.pem"
-
-    if not ca_key.exists() or not ca_cert.exists():
-        print("[INFO] Generating CA certificate and key...")
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
-        import datetime
-
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-
-        with open(ca_key, "wb") as f:
-            f.write(key.private_bytes(
+    def _generate_ca(self):
+        self.ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        with open(self.ca_key_path, "wb") as f:
+            f.write(self.ca_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
                 encryption_algorithm=serialization.NoEncryption(),
             ))
-        os.chmod(ca_key, 0o600)
+        os.chmod(self.ca_key_path, 0o600)
 
         subject = issuer = x509.Name([
             x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
@@ -181,23 +191,98 @@ def check_and_warn_mitm(cfg: dict):
             x509.NameAttribute(NameOID.COMMON_NAME, "v7lthronyx Relay Proxy CA"),
         ])
 
-        cert = (
+        self.ca_cert = (
             x509.CertificateBuilder()
             .subject_name(subject).issuer_name(issuer)
-            .public_key(key.public_key())
+            .public_key(self.ca_key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+            .not_valid_before(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1))
             .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-            .sign(key, hashes.SHA256())
+            .add_extension(x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=True,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ), critical=True)
+            .sign(self.ca_key, hashes.SHA256())
         )
 
-        with open(ca_cert, "wb") as f:
-            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(self.ca_cert_path, "wb") as f:
+            f.write(self.ca_cert.public_bytes(serialization.Encoding.PEM))
 
-        print(f"[INFO] CA certificate generated: {ca_cert}")
-    else:
-        print(f"[INFO] Using existing CA certificate: {ca_cert}")
+        print(f"[INFO] CA certificate generated: {self.ca_cert_path}")
+
+    def get_cert(self, hostname: str):
+        with self._lock:
+            if hostname in self.certs:
+                cert, key, expiry = self.certs[hostname]
+                if expiry > datetime.datetime.now(datetime.timezone.utc):
+                    return cert, key
+
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            subject = x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, hostname),
+            ])
+
+            alt_names = [x509.DNSName(hostname)]
+            try:
+                if '.' in hostname:
+                    alt_names.append(x509.DNSName(f"*.{'.'.join(hostname.split('.')[1:])}"))
+            except Exception:
+                pass
+
+            cert = (
+                x509.CertificateBuilder()
+                .subject_name(subject).issuer_name(self.ca_cert.subject)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1))
+                .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=90))
+                .add_extension(x509.SubjectAlternativeName(alt_names), critical=False)
+                .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+                .add_extension(x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=True,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ), critical=True)
+                .add_extension(x509.ExtendedKeyUsage([x509.oid.ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+                .sign(self.ca_key, hashes.SHA256(), self.ca_cert.public_key())
+            )
+
+            cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+            key_pem = key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            self.certs[hostname] = (cert_pem, key_pem, cert.not_valid_after_utc)
+            return cert_pem, key_pem
+
+
+def check_and_warn_mitm(cfg: dict):
+    if not cfg.get("mitm_enabled", False):
+        print("[INFO] HTTPS MITM is DISABLED. CONNECT requests will be rejected.")
+        return
+
+    print("")
+    print("!" * 60)
+    print("  WARNING: HTTPS MITM is ENABLED.")
+    print("  You will need to install the Root CA in your browser.")
+    print(f"  CA Certificate: {Path(cfg.get('ca_dir', './ca')) / 'ca.pem'}")
+    print("!" * 60)
+    print("")
 
 
 def find_free_port(host: str, start_port: int, max_tries: int = 100) -> Optional[int]:
@@ -223,8 +308,7 @@ def find_free_port(host: str, start_port: int, max_tries: int = 100) -> Optional
 
 
 # ----------------------------------------------------------------------
-#  DNS-over-HTTPS resolver — used so DNS lookups don't depend on the
-#  local network's resolver (which may be blocked or poisoned).
+#  DNS-over-HTTPS resolver
 # ----------------------------------------------------------------------
 class DoHResolver:
     DEFAULT_PROVIDERS = [
@@ -293,15 +377,18 @@ class DoHResolver:
                 except Exception:
                     continue
 
-        r = requests.get(
-            provider,
-            params={"name": host, "type": "A"},
-            headers={"Accept": "application/dns-json"},
-            timeout=5,
-        )
-        if r.status_code != 200:
+        try:
+            r = requests.get(
+                provider,
+                params={"name": host, "type": "A"},
+                headers={"Accept": "application/dns-json"},
+                timeout=5,
+            )
+            if r.status_code != 200:
+                return None
+            return r.json()
+        except Exception:
             return None
-        return r.json()
 
     def _https_json_query(
         self,
@@ -337,10 +424,7 @@ class DoHResolver:
 
 
 # ----------------------------------------------------------------------
-#  HTTP / HTTPS proxy handler.
-#  Plain HTTP is relayed via the relay backend.
-#  HTTPS CONNECT is tunneled directly (passthrough) — the client's TLS
-#  goes end-to-end to the destination, this proxy just shuffles bytes.
+#  HTTP / HTTPS proxy handler
 # ----------------------------------------------------------------------
 class RelayProxyHandler(BaseHTTPRequestHandler):
     relay_url = ""
@@ -349,8 +433,32 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
     log_authorization = False
     log_request_bodies = False
     resolver: DoHResolver = None
+    cert_manager: CertManager = None
+    mitm_enabled = False
     connect_timeout = 30
-    tunnel_timeout = 600
+    relay_follow_redirects = True   # kept for potential future use, but not directly used in new logic
+
+    _relay_session = None
+
+    @classmethod
+    def get_relay_session(cls):
+        """Plain requests session for relay (no DoH)."""
+        if cls._relay_session is None:
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            cls._relay_session = requests.Session()
+
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=[500, 502, 503, 504],
+                allowed_methods=["POST", "GET"]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            cls._relay_session.mount("http://", adapter)
+            cls._relay_session.mount("https://", adapter)
+        return cls._relay_session
 
     protocol_version = "HTTP/1.1"
 
@@ -375,8 +483,13 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self._handle_request("OPTIONS")
 
-    # ----- HTTPS CONNECT tunnel -----
+    # ----- HTTPS CONNECT tunnel / MITM -----
     def do_CONNECT(self):
+        if not self.mitm_enabled:
+            print("[CONNECT] MITM disabled, rejecting CONNECT request.")
+            self._safe_text_response(403, "HTTPS CONNECT not allowed (MITM disabled)")
+            return
+
         try:
             host, _, port_str = self.path.partition(":")
             port = int(port_str) if port_str else 443
@@ -384,62 +497,63 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
             self._safe_text_response(400, "Bad CONNECT target")
             return
 
-        target_ip = self.resolver.resolve(host) if self.resolver else host
-        print(f"[CONNECT] https://{host}:{port} -> {target_ip}")
+        print(f"[CONNECT] Intercepting HTTPS to {host}:{port}")
+
+        self.send_response(200, "Connection Established")
+        self.end_headers()
 
         try:
-            remote = socket.create_connection((target_ip, port), timeout=self.connect_timeout)
-        except OSError as e:
-            print(f"[CONNECT] failed https://{host}:{port} — {e}")
-            self._safe_text_response(502, f"CONNECT failed: {e}")
-            return
+            cert_pem, key_pem = self.cert_manager.get_cert(host)
+            temp_ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 
-        try:
-            self.wfile.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            self.wfile.flush()
-        except OSError:
-            remote.close()
-            return
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pem') as cert_file:
+                cert_file.write(cert_pem)
+                cert_path = cert_file.name
 
-        client = self.connection
-        client.setblocking(False)
-        remote.setblocking(False)
-        sockets = [client, remote]
-        last_active = time.time()
-        try:
-            while True:
-                if time.time() - last_active > self.tunnel_timeout:
-                    break
-                r, _, x = select.select(sockets, [], sockets, 5)
-                if x:
-                    break
-                if not r:
-                    continue
-                for s in r:
-                    try:
-                        data = s.recv(65536)
-                    except (BlockingIOError, InterruptedError):
-                        continue
-                    except OSError:
-                        return
-                    if not data:
-                        return
-                    other = remote if s is client else client
-                    try:
-                        other.sendall(data)
-                    except OSError:
-                        return
-                    last_active = time.time()
-        finally:
+            with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pem') as key_file:
+                key_file.write(key_pem)
+                key_path = key_file.name
+
             try:
-                remote.close()
-            except OSError:
-                pass
+                temp_ssl_context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            finally:
+                try:
+                    os.unlink(cert_path)
+                    os.unlink(key_path)
+                except Exception:
+                    pass
 
-    # ----- plain HTTP through relay -----
+            self.connection = temp_ssl_context.wrap_socket(
+                self.connection, server_side=True, do_handshake_on_connect=True
+            )
+            self.rfile = self.connection.makefile("rb", -1)
+            self.wfile = self.connection.makefile("wb", 0)
+
+            self.raw_requestline = self.rfile.readline(65537)
+            if not self.raw_requestline:
+                return
+
+            if not self.parse_request():
+                return
+
+            self._handle_request(self.command)
+
+        except ssl.SSLError as e:
+            print(f"[CONNECT] SSL Handshake failed with client for {host}: {e}")
+        except Exception as e:
+            print(f"[CONNECT] Error during MITM for {host}: {e}")
+        finally:
+            self.close_connection = True
+
+    # ----- HTTP request through relay -----
     def _handle_request(self, method):
+        # Internal health endpoints
         if self.path.startswith("/health"):
-            self._safe_json_response(200, {"status": "ok", "mode": "relay", "version": "3.1"})
+            self._safe_json_response(200, {
+                "status": "ok", "mode": "relay", "version": "3.1",
+                "mitm_enabled": self.mitm_enabled
+            })
             return
 
         if self.path.startswith("/test-google"):
@@ -455,22 +569,28 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
 
         if self.path.startswith("/test-relay"):
             try:
-                r = requests.post(
-                    self.relay_url,
-                    json={"method": "GET", "url": "https://httpbin.org/get", "headers": {}},
-                    timeout=15, allow_redirects=True,
-                )
-                self._safe_json_response(200, {
-                    "test": "relay", "relay_status": r.status_code,
-                    "ok": r.status_code == 200, "relay_response_preview": r.text[:500],
-                })
+                test_url = "https://httpbin.org/get"
+                resp_relay = self._send_to_relay("GET", test_url, {})
+                if resp_relay.get("status") == 200:
+                    self._safe_json_response(200, {
+                        "test": "relay", "relay_status": resp_relay.get("status"),
+                        "ok": True, "relay_response_preview": str(resp_relay.get("body", ""))[:500],
+                    })
+                else:
+                    self._safe_json_response(200, {
+                        "test": "relay", "relay_status": resp_relay.get("status", "N/A"),
+                        "ok": False, "error": resp_relay.get("error", "Unknown error from relay"),
+                    })
             except Exception as ex:
                 self._safe_json_response(200, {"test": "relay", "error": str(ex), "ok": False})
             return
 
+        # Determine the full URL
         url = self.path
         if not url.startswith("http"):
-            url = f"http://{self.headers.get('Host', 'unknown')}{url}"
+            host_header = self.headers.get('Host', 'unknown')
+            scheme = "https" if isinstance(self.connection, ssl.SSLSocket) else "http"
+            url = f"{scheme}://{host_header}{url}"
 
         if self.log_full_urls:
             print(f"[REQ] {method} {url}")
@@ -484,6 +604,7 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
             if h.lower() in ('host', 'proxy-connection', 'connection', 'content-length',
                              'transfer-encoding', 'accept-encoding'):
                 del headers_dict[h]
+
         if not self.log_cookies:
             headers_dict.pop("Cookie", None)
             headers_dict.pop("cookie", None)
@@ -491,43 +612,143 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
             for k in ("Authorization", "authorization", "Proxy-Authorization", "proxy-authorization"):
                 headers_dict.pop(k, None)
 
-        payload = {"method": method, "url": url, "headers": headers_dict}
-
+        body = b""
         content_length = int(self.headers.get("Content-Length", 0))
         if content_length > 0:
-            body = self.rfile.read(content_length)
+            try:
+                body = self.rfile.read(content_length)
+            except Exception as e:
+                print(f"[ERROR] Failed to read request body: {e}")
+                self._safe_text_response(500, "Failed to read request body")
+                return
+
+        resp_relay = self._send_to_relay(method, url, headers_dict, body)
+
+        status_code = resp_relay.get("status", 500)
+
+        if "error" in resp_relay:
+            print(f"[DEBUG] Relay response: status={status_code}, error={resp_relay['error']}")
+        else:
+            print(f"[DEBUG] Relay response: status={status_code}")
+
+        if "body_b64" in resp_relay:
+            response_body = base64.b64decode(resp_relay["body_b64"])
+        elif "body" in resp_relay:
+            body_content = resp_relay["body"]
+            response_body = body_content if isinstance(body_content, bytes) else body_content.encode("utf-8", errors="replace")
+        else:
+            response_body = b""
+
+        response_headers = resp_relay.get("headers", {})
+
+        try:
+            self.send_response(status_code)
+            for h_name, h_value in response_headers.items():
+                if h_name.lower() in ('connection', 'content-length', 'transfer-encoding'):
+                    continue
+                if isinstance(h_value, list):
+                    for val in h_value:
+                        self.send_header(h_name, val)
+                else:
+                    self.send_header(h_name, h_value)
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
+        except OSError as e:
+            if e.errno not in (errno.EPIPE, errno.ECONNRESET):
+                raise
+        finally:
+            self.close_connection = True
+
+    # =================================================================
+    #  GOOGLE APPS SCRIPT RELAY LOGIC  (Iran-filtering optimised)
+    # =================================================================
+    def _send_to_relay(self, method: str, url: str, headers: dict, body: bytes = b"") -> dict:
+        """
+        Handles Google Apps Script's POST‑Redirect‑GET flow:
+          1) POST the payload to /exec
+          2) If we get a 302, extract the redirect URL and send a GET
+          3) Otherwise return the status as-is
+        
+        Optimised for Iranian filtering conditions where only Google services
+        (script.google.com, script.googleusercontent.com) are accessible.
+        """
+        payload = {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "followRedirects": True,
+            "validateSsl": True
+        }
+
+        if body:
             try:
                 payload["body"] = body.decode("utf-8")
             except UnicodeDecodeError:
                 payload["body_b64"] = base64.b64encode(body).decode("ascii")
 
+        if self.log_full_urls:
+            print(f"[RELAY] {method} {url}")
+        else:
+            parsed = urllib.parse.urlparse(url)
+            print(f"[RELAY] {method} {parsed.hostname}...")
+
         try:
-            resp = requests.post(
-                self.relay_url, json=payload, timeout=30,
-                allow_redirects=True, headers={"Content-Type": "application/json"},
+            session = self.get_relay_session()
+
+            # ---------- Step 1: initial POST ----------
+            resp = session.post(
+                self.relay_url,
+                json=payload,
+                timeout=(8, 45),          # increased timeout for slow Iranian connections
+                allow_redirects=False,      # we handle the redirect ourselves
+                headers={"Content-Type": "application/json"},
             )
+
+            # ---------- Step 2: handle the Google Apps Script redirect ----------
+            if resp.status_code in (301, 302, 303, 307, 308):
+                redirect_url = resp.headers.get("Location")
+                if redirect_url:
+                    if self.log_full_urls:
+                        print(f"[RELAY] Following redirect to {redirect_url[:120]}...")
+                    # Google Apps Script expects a GET on the one-time URL
+                    resp = session.get(
+                        redirect_url,
+                        timeout=(8, 45),
+                        allow_redirects=True,
+                    )
+                else:
+                    return {"status": 502, "error": "Relay returned redirect without Location header"}
+
+            # ---------- Step 3: parse the final response ----------
             if resp.status_code == 200:
                 try:
                     data = resp.json()
-                    status_code = data.get("status", 200)
-                    response_body = data.get("body", "")
-                    if isinstance(response_body, str):
-                        body_bytes = response_body.encode("utf-8", errors="replace")
-                    else:
-                        body_bytes = bytes(response_body or b"")
-                    self._safe_raw_response(status_code, body_bytes, content_type="text/plain")
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    self._safe_text_response(502, "Invalid relay response")
+                    return data
+                except json.JSONDecodeError:
+                    # Sometimes GAS returns HTML error pages
+                    return {"status": 502, "error": "Invalid JSON from relay (maybe GAS error page)"}
             else:
-                self._safe_text_response(502, f"Relay returned HTTP {resp.status_code}")
-        except requests.exceptions.Timeout:
-            self._safe_text_response(504, "Relay timeout")
-        except requests.exceptions.ConnectionError as e:
-            self._safe_text_response(502, f"Relay connection error: {str(e)[:200]}")
-        except Exception as e:
-            self._safe_text_response(502, f"Relay error: {str(e)[:200]}")
+                err_msg = f"Relay returned HTTP {resp.status_code}"
+                try:
+                    text = resp.text[:200]
+                    if text:
+                        err_msg += f": {text}"
+                except Exception:
+                    pass
+                return {"status": resp.status_code, "error": err_msg}
 
-    # ----- write helpers that swallow client-disconnect errors -----
+        except requests.exceptions.Timeout:
+            return {"status": 504, "error": "Relay timeout — ممکن است اینترنت شما کند باشد یا script.google.com مسدود شده باشد"}
+        except requests.exceptions.ConnectionError as e:
+            return {"status": 502, "error": f"Relay connection error: {str(e)[:200]} — آیا script.google.com باز است؟"}
+        except Exception as e:
+            return {"status": 502, "error": f"Relay error: {str(e)[:200]}"}
+
+    # ----- safe response wrappers -----
     def _safe_json_response(self, status_code, data):
         body = json.dumps(data, indent=2).encode()
         self._safe_raw_response(status_code, body, content_type="application/json")
@@ -543,11 +764,14 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body_bytes)
+            self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass
         except OSError as e:
             if e.errno not in (errno.EPIPE, errno.ECONNRESET):
                 pass
+        finally:
+            self.close_connection = True
 
     def log_message(self, format, *args):
         pass
@@ -557,21 +781,26 @@ class RelayProxyHandler(BaseHTTPRequestHandler):
             super().handle_one_request()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             self.close_connection = True
+        except ssl.SSLError:
+            self.close_connection = True
+        except socket.error as e:
+            if e.errno not in (errno.ECONNRESET, errno.EPIPE):
+                raise
+            self.close_connection = True
 
 
 # ----------------------------------------------------------------------
-#  SOCKS5 server — gives a wider set of apps a way to use this proxy
-#  (anything that supports SOCKS5: curl --socks5, ssh -D consumers,
-#  Telegram, many CLIs). Only TCP CONNECT is supported.
+#  SOCKS5 server
 # ----------------------------------------------------------------------
 class Socks5Server(threading.Thread):
-    def __init__(self, host, port, resolver: DoHResolver, connect_timeout=30, tunnel_timeout=600):
+    def __init__(self, host, port, resolver: DoHResolver, cert_manager: CertManager, mitm_enabled: bool, connect_timeout=30):
         super().__init__(daemon=True)
         self.host = host
         self.port = port
         self.resolver = resolver
+        self.cert_manager = cert_manager
+        self.mitm_enabled = mitm_enabled
         self.connect_timeout = connect_timeout
-        self.tunnel_timeout = tunnel_timeout
         self._sock = None
         self._stop = threading.Event()
         self.ready = threading.Event()
@@ -632,7 +861,6 @@ class Socks5Server(threading.Thread):
         return buf
 
     def _handle_client(self, client: socket.socket):
-        remote = None
         try:
             client.settimeout(self.connect_timeout)
             ver_nmethods = self._recv_exact(client, 2)
@@ -640,7 +868,7 @@ class Socks5Server(threading.Thread):
                 return
             nmethods = ver_nmethods[1]
             self._recv_exact(client, nmethods)
-            client.sendall(b"\x05\x00")  # no auth
+            client.sendall(b"\x05\x00")
 
             header = self._recv_exact(client, 4)
             if header[0] != 0x05 or header[1] != 0x01:
@@ -661,17 +889,30 @@ class Socks5Server(threading.Thread):
                 return
             port = struct.unpack("!H", self._recv_exact(client, 2))[0]
 
-            target_ip = self.resolver.resolve(host) if self.resolver else host
-            print(f"[SOCKS5] CONNECT {host}:{port} -> {target_ip}")
-            try:
-                remote = socket.create_connection((target_ip, port), timeout=self.connect_timeout)
-            except OSError as e:
-                print(f"[SOCKS5] connect failed {host}:{port} — {e}")
-                client.sendall(b"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00")
-                return
-
             client.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
-            self._pump(client, remote)
+
+            dummy_server = ThreadingHTTPServer(('127.0.0.1', 0), RelayProxyHandler)
+            dummy_server.relay_url = RelayProxyHandler.relay_url
+            dummy_server.log_full_urls = RelayProxyHandler.log_full_urls
+            dummy_server.log_cookies = RelayProxyHandler.log_cookies
+            dummy_server.log_authorization = RelayProxyHandler.log_authorization
+            dummy_server.log_request_bodies = RelayProxyHandler.log_request_bodies
+            dummy_server.resolver = RelayProxyHandler.resolver
+            dummy_server.cert_manager = RelayProxyHandler.cert_manager
+            dummy_server.mitm_enabled = RelayProxyHandler.mitm_enabled
+            dummy_server.connect_timeout = RelayProxyHandler.connect_timeout
+            dummy_server.relay_follow_redirects = RelayProxyHandler.relay_follow_redirects
+
+            handler = RelayProxyHandler(client, client.getpeername(), dummy_server)
+            handler.raw_requestline = handler.rfile.readline(65537)
+
+            if handler.raw_requestline:
+                if handler.raw_requestline.startswith(b"CONNECT"):
+                    handler.path = handler.raw_requestline.split()[1].decode('ascii')
+                    handler.do_CONNECT()
+                else:
+                    if handler.parse_request():
+                        handler._handle_request(handler.raw_requestline.split()[0].decode('ascii'))
         except Exception as e:
             print(f"[SOCKS5] error: {e}")
         finally:
@@ -679,42 +920,6 @@ class Socks5Server(threading.Thread):
                 client.close()
             except OSError:
                 pass
-            if remote:
-                try:
-                    remote.close()
-                except OSError:
-                    pass
-
-    def _pump(self, a: socket.socket, b: socket.socket):
-        a.setblocking(False)
-        b.setblocking(False)
-        a.settimeout(None)
-        b.settimeout(None)
-        last = time.time()
-        socks = [a, b]
-        while True:
-            if time.time() - last > self.tunnel_timeout:
-                return
-            r, _, x = select.select(socks, [], socks, 5)
-            if x:
-                return
-            if not r:
-                continue
-            for s in r:
-                try:
-                    data = s.recv(65536)
-                except (BlockingIOError, InterruptedError):
-                    continue
-                except OSError:
-                    return
-                if not data:
-                    return
-                other = b if s is a else a
-                try:
-                    other.sendall(data)
-                except OSError:
-                    return
-                last = time.time()
 
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -738,13 +943,16 @@ def main():
     doh_providers = cfg.get("doh_providers") or None
     mode = cfg.get("mode", "vercel")
     relay_url = get_relay_url(cfg)
+    mitm_enabled = cfg.get("mitm_enabled", True)
+    ca_dir = Path(cfg.get("ca_dir", "./ca"))
+    relay_follow_redirects = cfg.get("relay_follow_redirects", True)   # kept for potential future use
 
     print(V7_BANNER)
 
-    # run_connectivity_checks(relay_url)
     check_and_warn_mitm(cfg)
 
     resolver = DoHResolver(providers=doh_providers) if doh_enabled else None
+    cert_manager = CertManager(ca_dir) if mitm_enabled else None
 
     RelayProxyHandler.relay_url = relay_url
     RelayProxyHandler.log_full_urls = cfg.get("log_full_urls", False)
@@ -752,7 +960,11 @@ def main():
     RelayProxyHandler.log_authorization = cfg.get("log_authorization", False)
     RelayProxyHandler.log_request_bodies = cfg.get("log_request_bodies", False)
     RelayProxyHandler.resolver = resolver
+    RelayProxyHandler.cert_manager = cert_manager
+    RelayProxyHandler.mitm_enabled = mitm_enabled
+    RelayProxyHandler.relay_follow_redirects = relay_follow_redirects
 
+    # Find available ports
     requested_socks_port = socks_port
     if socks_enabled:
         allocated_socks_port = find_free_port(bind_host, socks_port)
@@ -787,15 +999,13 @@ def main():
             raise
     else:
         print(f"[ERROR] Could not bind HTTP server to any port starting at {bind_port}")
-        if socks_server:
-            socks_server.stop()
         sys.exit(1)
 
     if bind_port != requested_bind_port and bind_port != allocated_bind_port:
         print(f"[WARN] HTTP proxy port changed again during bind; using {bind_port}.")
 
     if socks_enabled:
-        socks_server = Socks5Server(bind_host, socks_port, resolver)
+        socks_server = Socks5Server(bind_host, socks_port, resolver, cert_manager, mitm_enabled)
         socks_server.start()
         if not socks_server.ready.wait(timeout=5):
             print("[ERROR] SOCKS5 server did not finish startup.")
@@ -816,6 +1026,7 @@ def main():
         "socks_port": socks_port if socks_enabled else None,
         "requested_bind_port": requested_bind_port,
         "requested_socks_port": requested_socks_port if socks_enabled else None,
+        "mitm_enabled": mitm_enabled,
     }
     try:
         with open(runtime_file, "w") as f:
@@ -834,7 +1045,7 @@ def main():
     if socks_enabled:
         print(f"  SOCKS5 Proxy:     socks5://{bind_host}:{socks_port}")
     print(f"  DNS-over-HTTPS:   {'enabled' if doh_enabled else 'disabled'}")
-    print(f"  HTTPS CONNECT:    passthrough tunnel (no MITM)")
+    print(f"  HTTPS MITM:       {'enabled' if mitm_enabled else 'disabled (CONNECT will be rejected)'}")
     print("=" * 60)
     print("")
     print("  Browser Proxy Settings:")
@@ -872,6 +1083,8 @@ def main():
     finally:
         if socks_server:
             socks_server.stop()
+        if RelayProxyHandler._relay_session:
+            RelayProxyHandler._relay_session.close()
         server.server_close()
         try:
             runtime_file.unlink(missing_ok=True)

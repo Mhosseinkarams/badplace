@@ -335,22 +335,81 @@ curl http://127.0.0.1:8085/test-relay
 time curl -x http://127.0.0.1:8085 http://httpbin.org/get
 ```
 
-### عیب‌یابی
+### 🇮🇷 راهنمای ویژه: استفاده در شرایط فیلترینگ ایران
 
-- **پورت اشغال شده**: پورت‌ها را چک کنید و پروسه‌های قبلی را بکشید
-- **اتصال relay شکست خورد**: URL relay را چک کنید یا از Vercel استفاده کنید
-- **سرعت کم**: از Vercel استفاده کنید، DoH را غیرفعال کنید
-- **HTTPS کار نمی‌کند**: این پروکسی فقط HTTP را relay می‌کند، HTTPS مستقیم است
+> ⚠️ **توجه مهم**: این ابزار برای عبور از فیلترینگ ایران طراحی شده است. **فقط Google Apps Script** نیاز است باز باشد.
 
----bash
-chromium --proxy-server='http://127.0.0.1:8085' \
-         --user-data-dir='/tmp/proxy-browser-profile'
+#### پیش‌نیازها در ایران:
+1. **script.google.com باید باز باشد** — معمولاً در ایران فیلتر نیست
+2. **script.googleusercontent.com باید باز باشد** — برای redirectهای GAS
+3. **Python 3.9+** روی سیستم شما نصب باشد
+
+#### مراحل راه‌اندازی برای ایران:
+
+**۱. ساخت Google Apps Script Relay:**
+```bash
+# 1. به script.google.com بروید و پروژه جدید بسازید
+# 2. کد google-apps-script-relay.gs را کپی کنید
+# 3. Deploy → New deployment → Web app
+# 4. Execute as: Me, Who has access: Anyone
+# 5. URL را کپی کنید
 ```
 
-**Firefox:**
-- `about:preferences` → Network Settings → Manual proxy
-- HTTP Proxy: `127.0.0.1` Port: `8085`
-- گزینه "Also use this proxy for HTTPS" را فعال کنید
+**۲. تنظیم config.local.yaml:**
+```yaml
+mode: apps_script
+apps_script_url: "https://script.google.com/macros/s/YOUR_SCRIPT_ID/exec"
+bind_host: 127.0.0.1
+bind_port: 8085
+socks_enabled: true
+socks_port: 1081
+doh_enabled: true          # DNS-over-HTTPS برای دور زدن DNS فیلترینگ
+mitm_enabled: true           # برای HTTPS لازم است
+# ⚠️ همه لاگ‌ها غیرفعال شدند برای حفظ حریم خصوصی
+log_full_urls: false
+log_cookies: false
+log_authorization: false
+log_request_bodies: false
+```
+
+**۳. اجرا:**
+```bash
+./run-local.sh
+```
+
+**۴. تست اتصال:**
+```bash
+# تست سلامت پروکسی
+curl http://127.0.0.1:8085/health
+
+# تست اتصال گوگل (مهم برای ایران)
+curl http://127.0.0.1:8085/test-google
+
+# تست relay
+curl http://127.0.0.1:8085/test-relay
+```
+
+#### نکات مهم برای ایران:
+- **فقط Google Apps Script** نیاز است باز باشد — بقیه سایت‌ها از طریق relay باز می‌شوند
+- **Vercel فیلتر است** — در ایران از Google Apps Script استفاده کنید
+- **DoH فعال بگذارید** — برای دور زدن DNS فیلترینگ ایران
+- **MITM فعال بگذارید** — برای HTTPS لازم است
+- **حریم خصوصی**: همه لاگ‌ها غیرفعال شدند — هیچ URL، کوکی یا هدر Authorization لاگ نمی‌شود
+
+#### عیب‌یابی در ایران:
+
+- **script.google.com مسدود است**: این ابزار کار نخواهد کرد. VPN دیگری پیدا کنید.
+- **تایم‌اوت**: اینترنت شما کند است یا script.google.com ناپایدار است. دوباره تلاش کنید.
+- **HTTPS کار نمی‌کند**: `mitm_enabled: true` را در config بگذارید و CA certificate را در مرورگر نصب کنید.
+- **DNS کار نمی‌کند**: `doh_enabled: true` را بررسی کنید.
+
+---
+
+### عیب‌یابی عمومی
+
+- **پورت اشغال شده**: پورت‌ها را چک کنید و پروسه‌های قبلی را بکشید
+- **اتصال relay شکست خورد**: URL relay را چک کنید
+- **سرعت کم**: DoH را غیرفعال کنید (`doh_enabled: false`)
 
 ### نکات امنیتی
 
