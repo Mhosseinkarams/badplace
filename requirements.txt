@@ -6,3 +6,5 @@ pyyaml>=6.0
 
 # HTTP requests (for connectivity checks)
 requests>=2.31.0
+
+cryptography
